@@ -1,0 +1,86 @@
+name: Build APK
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - run: yes | sdkmanager --licenses
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - run: npm install
+
+      - name: FORCE REMOVE SSR (Secure JSON Edit)
+        run: |
+          # ใช้ jq ในการลบ Config เกี่ยวกับ SSR ออกอย่างปลอดภัย ไม่ให้ไฟล์ JSON แตกพัง
+          jq 'del(.projects.app.architect.build.options.server, .projects.app.architect.build.options.ssr, .projects.app.architect.build.options.outputMode, .projects.app.architect.build.options.prerender)' angular.json > angular.tmp.json
+          mv angular.tmp.json angular.json
+          rm -f src/main.server.ts || true
+          rm -f server.ts || true
+
+      - name: BUILD (PURE BROWSER)
+        run: npx ng build --configuration production
+
+      - name: Detect build folder
+        id: web
+        run: |
+          # ค้นหาโฟลเดอร์ที่มี index.html (รองรับโฟลเดอร์ output ทุกรูปแบบของ Angular)
+          FILE=$(find dist -name index.html | head -n 1)
+          DIR=$(dirname "$FILE")
+          echo "dir=$DIR" >> $GITHUB_OUTPUT
+
+      - name: Prepare web
+        run: |
+          rm -rf web
+          mkdir web
+          cp -r "${{ steps.web.outputs.dir }}/." web/
+
+      - name: Create capacitor config
+        run: |
+          echo '{
+            "appId": "com.korat.app",
+            "appName": "KoratRoute",
+            "webDir": "web",
+            "bundledWebRuntime": false
+          }' > capacitor.config.json
+
+      - name: Setup Capacitor
+        run: |
+          # ใช้ Capacitor v6 ล่าสุดที่รองรับ Node 20 และ Angular 17/18
+          npm install @capacitor/core@6 @capacitor/cli@6 @capacitor/android@6
+          npx cap add android || true
+          npx cap sync android
+
+      - name: Install Android build tools
+        run: |
+          sdkmanager "platforms;android-34" "build-tools;34.0.0"
+
+      - name: Build APK (Assemble Debug)
+        working-directory: android
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleDebug
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-debug-apk
+          path: android/app/build/outputs/apk/debug/app-debug.apk
